@@ -1,7 +1,7 @@
 from decimal import Decimal
 from datetime import datetime
 from math import exp
-from models import SensorData, ProcessedData, Alert, AlertType, Severity, AlertStatus
+from app.models import SensorData, ProcessedData, Alert, AlertType, Severity, AlertStatus
 from sqlalchemy.orm import Session
 
 LOW_BATTERY_THRESHOLD = 20
