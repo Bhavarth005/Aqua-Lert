@@ -1,9 +1,10 @@
 from decimal import Decimal
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, engine
 from app.models import Base, Sensor, SensorStatus, SensorData, Alert, AlertType, Severity, AlertStatus
 from datetime import datetime
+from typing import List
 
 # Create tables (already done, but safe to keep)
 Base.metadata.create_all(bind=engine)
@@ -238,3 +239,68 @@ def delete_alert(alert_id: int, db: Session = Depends(get_db)):
     db.commit()
     return {"message": f"Alert {alert_id} deleted successfully"}
 
+# ---------------- ADDITIONAL ROUTES ---------------- #
+
+# Filter Sensor Data by Date / Limit
+
+@app.get("/sensors/{sensor_id}/data/filter")
+def get_filtered_sensor_data(
+    sensor_id: str,
+    start: str = Query(None, description="Start datetime ISO format"),
+    end: str = Query(None, description="End datetime ISO format"),
+    limit: int = Query(50, description="Max number of records"),
+    db: Session = Depends(get_db)
+):
+    sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+    if not sensor:
+        raise HTTPException(status_code=404, detail="Sensor not found")
+
+    query = db.query(SensorData).filter(SensorData.sensor_id == sensor_id)
+
+    if start:
+        start_dt = datetime.fromisoformat(start)
+        query = query.filter(SensorData.timestamp >= start_dt)
+    if end:
+        end_dt = datetime.fromisoformat(end)
+        query = query.filter(SensorData.timestamp <= end_dt)
+
+    readings = query.order_by(SensorData.timestamp.desc()).limit(limit).all()
+    return readings
+
+# Filter Alerts by Sensor / Type / Severity
+
+@app.get("/alerts/filter")
+def get_filtered_alerts(
+    sensor_id: str = None,
+    alert_type: AlertType = None,
+    severity: Severity = None,
+    status: AlertStatus = AlertStatus.active,
+    db: Session = Depends(get_db)
+):
+    query = db.query(Alert)
+
+    if sensor_id:
+        query = query.filter(Alert.sensor_id == sensor_id)
+    if alert_type:
+        query = query.filter(Alert.alert_type == alert_type)
+    if severity:
+        query = query.filter(Alert.severity == severity)
+    if status:
+        query = query.filter(Alert.status == status)
+
+    alerts = query.order_by(Alert.timestamp.desc()).all()
+    return alerts
+
+# Bulk Resolve Alerts
+
+@app.post("/alerts/resolve/bulk")
+def bulk_resolve_alerts(alert_ids: List[int], db: Session = Depends(get_db)):
+    alerts = db.query(Alert).filter(Alert.alert_id.in_(alert_ids)).all()
+    if not alerts:
+        raise HTTPException(status_code=404, detail="No alerts found")
+
+    for alert in alerts:
+        alert.status = AlertStatus.resolved
+
+    db.commit()
+    return {"message": f"{len(alerts)} alerts resolved successfully"}
