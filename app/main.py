@@ -95,7 +95,6 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
-    # Save raw sensor data
     new_data = SensorData(
         sensor_id=sensor_id,
         timestamp=datetime.utcnow(),
@@ -106,14 +105,13 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     db.commit()
     db.refresh(new_data)
 
-    # Process data and generate dynamic alerts
-    processed, alerts = process_sensor_data(db, new_data)
+    processed, alerts = process_sensor_data(db, new_data, sensor)
 
     return {
         "message": "Data added successfully",
         "data_id": new_data.id,
         "processed_id": processed.id,
-        "alerts": [a.alert_type.value for a in alerts]
+        "alerts": [{"type": a.alert_type.value, "severity": a.severity.value, "probability": a.probability} for a in alerts]
     }
 
 # Fetch recent readings for a sensor
