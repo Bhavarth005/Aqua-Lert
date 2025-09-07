@@ -5,6 +5,7 @@ from app.database import SessionLocal, engine
 from app.models import Base, Sensor, SensorStatus, SensorData, Alert, AlertType, Severity, AlertStatus
 from datetime import datetime
 from typing import List
+from app.utils import process_sensor_data
 
 # Create tables (already done, but safe to keep)
 Base.metadata.create_all(bind=engine)
@@ -94,20 +95,26 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
+    # Save raw sensor data
     new_data = SensorData(
-    sensor_id=sensor_id,
-    timestamp=datetime.utcnow(),
-    flow_rate=flow_rate,
-    battery_level=battery_level
+        sensor_id=sensor_id,
+        timestamp=datetime.utcnow(),
+        flow_rate=flow_rate,
+        battery_level=battery_level
     )
     db.add(new_data)
     db.commit()
     db.refresh(new_data)
 
-    # Run alert checks
-    alerts = check_for_alerts(db, new_data)
-    return {"message": "Data added successfully", "data_id": new_data.id, "alerts": [a.alert_type.value for a in alerts]}
+    # Process data and generate dynamic alerts
+    processed, alerts = process_sensor_data(db, new_data)
 
+    return {
+        "message": "Data added successfully",
+        "data_id": new_data.id,
+        "processed_id": processed.id,
+        "alerts": [a.alert_type.value for a in alerts]
+    }
 
 # Fetch recent readings for a sensor
 @app.get("/sensors/{sensor_id}/data")
