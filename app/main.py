@@ -3,17 +3,17 @@ from fastapi import FastAPI, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, engine
-from app.models import Base, Sensor, SensorStatus, SensorData, Alert, AlertType, Severity, AlertStatus
+from app.models import Base, Sensor, SensorStatus, SensorData, Alert, AlertType, Severity, AlertStatus, PipelineTopology
 from datetime import datetime
 from typing import List, Dict
-from app.utils import process_sensor_data_pairwise
+from app.utils import process_sensor_data_topology, build_topology
 
-# Create tables (already done, but safe to keep)
+# Create tables
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Smart Water Leakage API")
 
-# Dependency to get DB session
+# ------------------- DB Session ------------------- #
 def get_db():
     db = SessionLocal()
     try:
@@ -21,16 +21,18 @@ def get_db():
     finally:
         db.close()
 
-# ------------------- Pydantic model for incoming sensor data ------------------- #
+# ------------------- Pydantic Models ------------------- #
 class SensorReading(BaseModel):
     sensor_id: str
     flow_rate: float
     battery_level: int
     timestamp: datetime        
 
-# ---------------- SENSOR ROUTES ---------------- #
+class TopologyMapping(BaseModel):
+    parent_sensor_id: str
+    child_sensor_id: str
 
-# Register a new sensor
+# ------------------- SENSOR ROUTES ------------------- #
 @app.post("/sensors")
 def create_sensor(sensor_id: str, location: str, pipe_diameter_mm: int, db: Session = Depends(get_db)):
     existing = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
@@ -47,11 +49,9 @@ def create_sensor(sensor_id: str, location: str, pipe_diameter_mm: int, db: Sess
     db.refresh(new_sensor)
     return {"message": "Sensor registered successfully", "sensor": sensor_id}
 
-# List all sensors
 @app.get("/sensors")
 def list_sensors(db: Session = Depends(get_db)):
-    sensors = db.query(Sensor).all()
-    return sensors
+    return db.query(Sensor).all()
 
 @app.put("/sensors/{sensor_id}")
 def update_sensor(
@@ -65,7 +65,6 @@ def update_sensor(
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
-    # Update only provided fields
     if location is not None:
         sensor.location = location
     if pipe_diameter_mm is not None:
@@ -83,27 +82,46 @@ def delete_sensor(sensor_id: str, db: Session = Depends(get_db)):
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
-    # Delete related sensor data
     db.query(SensorData).filter(SensorData.sensor_id == sensor_id).delete()
-    # Delete related alerts
-    db.query(Alert).filter(Alert.sensor_id == sensor_id).delete()
-    # Delete sensor
+    db.query(Alert).filter(Alert.sensor_from == sensor_id).delete()
+    db.query(Alert).filter(Alert.sensor_to == sensor_id).delete()
+    db.query(PipelineTopology).filter(
+        (PipelineTopology.parent_sensor_id == sensor_id) | 
+        (PipelineTopology.child_sensor_id == sensor_id)
+    ).delete()
+
     db.delete(sensor)
     db.commit()
-
     return {"message": f"Sensor {sensor_id} and its data/alerts deleted successfully"}
 
+# ------------------- TOPOLOGY ROUTES ------------------- #
+@app.post("/topology/add")
+def add_topology(mapping: TopologyMapping, db: Session = Depends(get_db)):
+    parent = db.query(Sensor).filter(Sensor.sensor_id == mapping.parent_sensor_id).first()
+    child = db.query(Sensor).filter(Sensor.sensor_id == mapping.child_sensor_id).first()
 
-# ---------------- SENSOR DATA ROUTES ---------------- #
+    if not parent or not child:
+        raise HTTPException(status_code=404, detail="Parent or child sensor not found")
 
-# Add a new reading for a sensor
+    db.add(PipelineTopology(
+        parent_sensor_id=mapping.parent_sensor_id,
+        child_sensor_id=mapping.child_sensor_id
+    ))
+    db.commit()
+    return {"message": "Topology mapping added successfully"}
+
+@app.get("/topology/view")
+def view_topology(db: Session = Depends(get_db)):
+    topology = build_topology(db)
+    return dict(topology)
+
+# ------------------- SENSOR DATA ROUTES ------------------- #
 @app.post("/sensors/{sensor_id}/data")
 def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Session = Depends(get_db)):
     sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
-    # Step 1: Add the new sensor reading
     new_data = SensorData(
         sensor_id=sensor_id,
         flow_rate=flow_rate,
@@ -114,77 +132,61 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     db.commit()
     db.refresh(new_data)
 
-    # Step 2: Fetch all sensors in pipeline order
-    sensors = db.query(Sensor).order_by(Sensor.sensor_id).all()
+    topology = build_topology(db)
+    sensors = db.query(Sensor).all()
+    sensor_data_dict = {sensor_id: new_data}
 
-    # Step 3: Prepare new readings dict for processing
-    sensor_data_dict = {
-        sensor_id: new_data
-    }
-
-    # Step 4: Process data pairwise and generate alerts
-    alerts = process_sensor_data_pairwise(db, sensors, sensor_data_dict)
-
-    # Step 5: Format alerts for JSON response
-    alert_response = []
-    for a in alerts:
-        alert_response.append({
-            "alert_id": a.alert_id,
-            "sensor_from": a.sensor_from,
-            "sensor_to": a.sensor_to,
-            "alert_type": a.alert_type.value,
-            "severity": a.severity.value,
-            "probability": float(a.probability),
-            "timestamp": a.timestamp.isoformat(),
-            "status": a.status.value
-        })
+    alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, topology)
 
     return {
         "message": "Data added successfully",
         "data_id": new_data.id,
-        "alerts": alert_response
+        "alerts": [
+            {
+                "alert_id": a.alert_id,
+                "sensor_from": a.sensor_from,
+                "sensor_to": a.sensor_to,
+                "alert_type": a.alert_type.value,
+                "severity": a.severity.value,
+                "probability": float(a.probability),
+                "timestamp": a.timestamp.isoformat(),
+                "status": a.status.value
+            } for a in alerts
+        ]
     }
 
 @app.post("/sensors/data")
 def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get_db)):
-    """
-    Receive multiple sensor readings at once,
-    process them pairwise along the pipeline,
-    and return generated alerts.
-    """
-    # Step 1: Fetch sensors from DB in pipeline order
-    sensors = db.query(Sensor).order_by(Sensor.sensor_id).all()
+    sensors = db.query(Sensor).all()
     if not sensors:
         raise HTTPException(status_code=404, detail="No sensors found in database")
 
-    # Step 2: Convert readings to dict {sensor_id: SensorData object}
-    sensor_data_dict: Dict[str, SensorData] = {}
-    for r in readings:
-        sensor_data_dict[r.sensor_id] = SensorData(
+    sensor_data_dict = {
+        r.sensor_id: SensorData(
             sensor_id=r.sensor_id,
             flow_rate=r.flow_rate,
             battery_level=r.battery_level,
             timestamp=r.timestamp
-        )
+        ) for r in readings
+    }
 
-    # Step 3: Process data and generate alerts
-    alerts = process_sensor_data_pairwise(db, sensors, sensor_data_dict)
+    topology = build_topology(db)
+    alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, topology)
 
-    # Step 4: Format alerts to return JSON
-    response = []
-    for a in alerts:
-        response.append({
-            "alert_id": a.alert_id,
-            "sensor_from": a.sensor_from,
-            "sensor_to": a.sensor_to,
-            "alert_type": a.alert_type.value,
-            "severity": a.severity.value,
-            "probability": float(a.probability),
-            "timestamp": a.timestamp.isoformat(),
-            "status": a.status.value
-        })
-
-    return {"alerts_generated": response}
+    return {
+        "alerts_generated": [
+            {
+                "alert_id": a.alert_id,
+                "sensor_from": a.sensor_from,
+                "sensor_to": a.sensor_to,
+                "alert_type": a.alert_type.value,
+                "severity": a.severity.value,
+                "probability": float(a.probability),
+                "timestamp": a.timestamp.isoformat(),
+                "status": a.status.value
+            } for a in alerts
+        ]
+    }
 
 # Fetch recent readings for a sensor
 @app.get("/sensors/{sensor_id}/data")

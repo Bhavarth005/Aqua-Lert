@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, Date, Enum, DECIMAL, DateTime, BigInteger
+from sqlalchemy import Column, String, Integer, Date, Enum, DECIMAL, DateTime, BigInteger, ForeignKey
 from sqlalchemy.ext.declarative import declarative_base
 import enum
 
@@ -65,3 +65,9 @@ class Alert(Base):
     severity = Column(Enum(Severity))
     probability = Column(DECIMAL(5, 2))
     status = Column(Enum(AlertStatus), default=AlertStatus.active)
+
+class PipelineTopology(Base):
+    __tablename__ = "pipeline_topology"
+    id = Column(Integer, primary_key=True, index=True)
+    parent_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"))
+    child_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"))
