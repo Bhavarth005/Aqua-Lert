@@ -58,7 +58,8 @@ class Alert(Base):
     __tablename__ = "alerts"
 
     alert_id = Column(BigInteger, primary_key=True, autoincrement=True)
-    sensor_id = Column(String(50))
+    sensor_from = Column(String(50))  # new: start sensor
+    sensor_to = Column(String(50))    # new: end sensor
     timestamp = Column(DateTime)
     alert_type = Column(Enum(AlertType))
     severity = Column(Enum(Severity))

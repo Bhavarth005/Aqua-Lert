@@ -1,155 +1,130 @@
-import numpy as np
-import skfuzzy as fuzz
-from skfuzzy import control as ctrl
 from decimal import Decimal
 from datetime import datetime
+from math import exp
 from models import SensorData, ProcessedData, Alert, AlertType, Severity, AlertStatus
 from sqlalchemy.orm import Session
 
-WINDOW_SIZE = 5
 LOW_BATTERY_THRESHOLD = 20
 ANOMALY_FLOW_DROP = 0.5
 
-# ----------------- FUZZY LOGIC FUNCTION ----------------- #
-def compute_leak_probability(flow, flow_diff, battery):
-    # Fuzzy variables
-    flow_var = ctrl.Antecedent(np.arange(0, 101, 1), 'flow')
-    diff_var = ctrl.Antecedent(np.arange(-50, 51, 1), 'flow_diff')
-    battery_var = ctrl.Antecedent(np.arange(0, 101, 1), 'battery')
-    leak_prob = ctrl.Consequent(np.arange(0, 101, 1), 'leak_prob')
+# ---------------- SIGMOID FUNCTION ---------------- #
+def sigmoid(x, x0=0, k=1):
+    """Standard sigmoid: smooth mapping to 0-1"""
+    return 1 / (1 + exp(-k*(x-x0)))
 
-    # Membership functions
-    flow_var['low'] = fuzz.trimf(flow_var.universe, [0, 0, 50])
-    flow_var['medium'] = fuzz.trimf(flow_var.universe, [25, 50, 75])
-    flow_var['high'] = fuzz.trimf(flow_var.universe, [50, 100, 100])
+def compute_leak_probability_sigmoid(flow1, flow2, battery1, battery2):
+    """
+    Returns leak probability 0-100% based on two-sensor readings using sigmoid logic
+    """
+    # Average flow and flow difference
+    flow_avg = (flow1 + flow2) / 2
+    flow_diff = abs(flow1 - flow2)
+    battery_avg = (battery1 + battery2) / 2
 
-    diff_var['stable'] = fuzz.trimf(diff_var.universe, [-50, 0, 50])
-    diff_var['sudden'] = fuzz.trimf(diff_var.universe, [0, 50, 50])
+    # Sigmoid mappings (tunable)
+    flow_score = sigmoid(flow_avg, x0=50, k=0.1)       # higher flow → higher leak
+    diff_score = sigmoid(flow_diff, x0=5, k=0.5)       # higher difference → higher leak
+    battery_score = 1 - sigmoid(battery_avg, x0=30, k=0.2)  # low battery → increase leak prob
 
-    battery_var['low'] = fuzz.trimf(battery_var.universe, [0, 0, 30])
-    battery_var['good'] = fuzz.trimf(battery_var.universe, [20, 100, 100])
+    # Weighted combination (can tune weights)
+    leak_prob = (0.5*flow_score + 0.4*diff_score + 0.1*battery_score) * 100
+    return leak_prob
 
-    leak_prob['low'] = fuzz.trimf(leak_prob.universe, [0, 0, 50])
-    leak_prob['medium'] = fuzz.trimf(leak_prob.universe, [25, 50, 75])
-    leak_prob['high'] = fuzz.trimf(leak_prob.universe, [50, 100, 100])
-
-    # Rules
-    rules = [
-        ctrl.Rule(flow_var['high'] & diff_var['sudden'], leak_prob['high']),
-        ctrl.Rule(flow_var['medium'] & diff_var['sudden'], leak_prob['medium']),
-        ctrl.Rule(flow_var['low'] & diff_var['stable'], leak_prob['low']),
-        ctrl.Rule(battery_var['low'], leak_prob['medium'])
-    ]
-
-    system = ctrl.ControlSystem(rules)
-    sim = ctrl.ControlSystemSimulation(system)
-
-    sim.input['flow'] = flow
-    sim.input['flow_diff'] = flow_diff
-    sim.input['battery'] = battery
-
-    sim.compute()
-    return sim.output['leak_prob']  # 0-100%
-
-# ----------------- PROCESSING FUNCTION ----------------- #
-def compute_smoothed_flow(db: Session, sensor_id: str) -> Decimal:
-    last_readings = (
-        db.query(SensorData)
-        .filter(SensorData.sensor_id == sensor_id)
-        .order_by(SensorData.timestamp.desc())
-        .limit(WINDOW_SIZE)
-        .all()
-    )
-    if not last_readings:
-        return Decimal(0)
-    avg_flow = sum([r.flow_rate for r in last_readings]) / len(last_readings)
-    return Decimal(avg_flow)
-
-def compute_flow_diff(db: Session, sensor_id: str, current_flow: Decimal) -> Decimal:
-    last_processed = (
-        db.query(ProcessedData)
-        .filter(ProcessedData.sensor_id == sensor_id)
-        .order_by(ProcessedData.timestamp.desc())
-        .first()
-    )
-    if last_processed:
-        diff = current_flow - last_processed.smoothed_flow
-    else:
-        diff = Decimal(0)
-    return diff
-
-def process_sensor_data(db: Session, sensor_data: SensorData, sensor):
-    # 1. Compute smoothed flow and flow_diff
-    smoothed_flow = compute_smoothed_flow(db, sensor_data.sensor_id)
-    flow_diff = compute_flow_diff(db, sensor_data.sensor_id, smoothed_flow)
-
-    # 2. Save processed data
-    processed = ProcessedData(
-        sensor_id=sensor_data.sensor_id,
-        timestamp=sensor_data.timestamp,
-        smoothed_flow=smoothed_flow,
-        flow_diff=flow_diff
-    )
-    db.add(processed)
-    db.commit()
-    db.refresh(processed)
-
+# ---------------- PROCESS SENSOR DATA ---------------- #
+def process_sensor_data_pairwise(db: Session, sensors: list, new_readings: dict):
+    """
+    sensors: list of Sensor objects along the pipeline in order
+    new_readings: dict {sensor_id: SensorData object just received}
+    """
     alerts = []
+    
+    # Compute processed data for each sensor individually
+    for sensor in sensors:
+        sensor_data = new_readings[sensor.sensor_id]
+        # Smoothed flow: average of last 5 readings
+        last_proc = db.query(ProcessedData).filter(ProcessedData.sensor_id==sensor.sensor_id).order_by(ProcessedData.timestamp.desc()).limit(5).all()
+        if last_proc:
+            smoothed_flow = float(sum([p.smoothed_flow for p in last_proc])/len(last_proc))
+        else:
+            smoothed_flow = float(sensor_data.flow_rate)
 
-    # 3. Compute leak probability using fuzzy logic
-    leak_prob = compute_leak_probability(float(smoothed_flow), float(flow_diff), sensor_data.battery_level)
+        flow_diff = 0
+        if last_proc:
+            flow_diff = float(smoothed_flow - last_proc[0].smoothed_flow)
 
-    # 4. Classify leak severity based on leak_prob and flow_diff
-    leak_severity = None
-    if leak_prob < 50:
-        leak_severity = Severity.low
-    elif leak_prob < 70 or abs(flow_diff) < 1.0:
-        leak_severity = Severity.medium
-    else:
-        leak_severity = Severity.high
-
-    # 5. Create leak alert if probability > 50%
-    if leak_prob >= 50:
-        alert = Alert(
-            sensor_id=sensor_data.sensor_id,
+        processed = ProcessedData(
+            sensor_id=sensor.sensor_id,
             timestamp=sensor_data.timestamp,
-            alert_type=AlertType.leak,
-            severity=leak_severity,
-            probability=leak_prob,
-            status=AlertStatus.active
+            smoothed_flow=Decimal(smoothed_flow),
+            flow_diff=Decimal(flow_diff)
         )
-        db.add(alert)
-        alerts.append(alert)
+        db.add(processed)
+    db.commit()
 
-    # 6. Anomaly alert: sudden negative flow spike
-    if flow_diff < -ANOMALY_FLOW_DROP:
-        alert = Alert(
-            sensor_id=sensor_data.sensor_id,
-            timestamp=sensor_data.timestamp,
-            alert_type=AlertType.anomaly,
-            severity=Severity.medium,
-            probability=85.0,
-            status=AlertStatus.active
-        )
-        db.add(alert)
-        alerts.append(alert)
+    # ---------------- CHECK PAIRS ---------------- #
+    for i in range(len(sensors)-1):
+        s1 = sensors[i]
+        s2 = sensors[i+1]
+        d1 = new_readings[s1.sensor_id]
+        d2 = new_readings[s2.sensor_id]
 
-    # 7. Low battery alert
-    if sensor_data.battery_level < LOW_BATTERY_THRESHOLD:
-        alert = Alert(
-            sensor_id=sensor_data.sensor_id,
-            timestamp=sensor_data.timestamp,
-            alert_type=AlertType.low_battery,
-            severity=Severity.low,
-            probability=90.0,
-            status=AlertStatus.active
-        )
-        db.add(alert)
-        alerts.append(alert)
+        # Compute leak probability using sigmoid fuzzy logic
+        leak_prob = compute_leak_probability_sigmoid(d1.flow_rate, d2.flow_rate, d1.battery_level, d2.battery_level)
+
+        # Determine severity
+        if leak_prob < 50:
+            severity = Severity.low
+        elif leak_prob < 70:
+            severity = Severity.medium
+        else:
+            severity = Severity.high
+
+        # Create leak alert if probability > 50%
+        if leak_prob >= 50:
+            alert = Alert(
+                sensor_from = s1.sensor_id,
+                sensor_to = s2.sensor_id,
+                timestamp = datetime.utcnow(),
+                alert_type = AlertType.leak,
+                severity = severity,
+                probability = leak_prob,
+                status = AlertStatus.active
+            )
+            db.add(alert)
+            alerts.append(alert)
+
+        # Optional: anomaly based on sudden negative drop in either sensor
+        if (d1.flow_rate - d2.flow_rate) < -ANOMALY_FLOW_DROP:
+            alert = Alert(
+                sensor_from = s1.sensor_id,
+                sensor_to = s2.sensor_id,
+                timestamp = datetime.utcnow(),
+                alert_type = AlertType.anomaly,
+                severity = Severity.medium,
+                probability = 85.0,
+                status = AlertStatus.active
+            )
+            db.add(alert)
+            alerts.append(alert)
+
+        # Low battery alerts
+        for s, d in [(s1,d1),(s2,d2)]:
+            if d.battery_level < LOW_BATTERY_THRESHOLD:
+                alert = Alert(
+                    sensor_from = s.sensor_id,
+                    sensor_to = s.sensor_id,
+                    timestamp = datetime.utcnow(),
+                    alert_type = AlertType.low_battery,
+                    severity = Severity.low,
+                    probability = 90.0,
+                    status = AlertStatus.active
+                )
+                db.add(alert)
+                alerts.append(alert)
 
     if alerts:
         db.commit()
         for a in alerts:
             db.refresh(a)
 
-    return processed, alerts
+    return alerts

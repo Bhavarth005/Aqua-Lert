@@ -1,11 +1,12 @@
 from decimal import Decimal
 from fastapi import FastAPI, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, engine
 from app.models import Base, Sensor, SensorStatus, SensorData, Alert, AlertType, Severity, AlertStatus
 from datetime import datetime
-from typing import List
-from app.utils import process_sensor_data
+from typing import List, Dict
+from app.utils import process_sensor_data_pairwise
 
 # Create tables (already done, but safe to keep)
 Base.metadata.create_all(bind=engine)
@@ -19,6 +20,13 @@ def get_db():
         yield db
     finally:
         db.close()
+
+# ------------------- Pydantic model for incoming sensor data ------------------- #
+class SensorReading(BaseModel):
+    sensor_id: str
+    flow_rate: float
+    battery_level: int
+    timestamp: datetime        
 
 # ---------------- SENSOR ROUTES ---------------- #
 
@@ -95,24 +103,88 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     if not sensor:
         raise HTTPException(status_code=404, detail="Sensor not found")
 
+    # Step 1: Add the new sensor reading
     new_data = SensorData(
         sensor_id=sensor_id,
-        timestamp=datetime.utcnow(),
         flow_rate=flow_rate,
-        battery_level=battery_level
+        battery_level=battery_level,
+        timestamp=datetime.utcnow()
     )
     db.add(new_data)
     db.commit()
     db.refresh(new_data)
 
-    processed, alerts = process_sensor_data(db, new_data, sensor)
+    # Step 2: Fetch all sensors in pipeline order
+    sensors = db.query(Sensor).order_by(Sensor.sensor_id).all()
+
+    # Step 3: Prepare new readings dict for processing
+    sensor_data_dict = {
+        sensor_id: new_data
+    }
+
+    # Step 4: Process data pairwise and generate alerts
+    alerts = process_sensor_data_pairwise(db, sensors, sensor_data_dict)
+
+    # Step 5: Format alerts for JSON response
+    alert_response = []
+    for a in alerts:
+        alert_response.append({
+            "alert_id": a.alert_id,
+            "sensor_from": a.sensor_from,
+            "sensor_to": a.sensor_to,
+            "alert_type": a.alert_type.value,
+            "severity": a.severity.value,
+            "probability": float(a.probability),
+            "timestamp": a.timestamp.isoformat(),
+            "status": a.status.value
+        })
 
     return {
         "message": "Data added successfully",
         "data_id": new_data.id,
-        "processed_id": processed.id,
-        "alerts": [{"type": a.alert_type.value, "severity": a.severity.value, "probability": a.probability} for a in alerts]
+        "alerts": alert_response
     }
+
+@app.post("/sensors/data")
+def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get_db)):
+    """
+    Receive multiple sensor readings at once,
+    process them pairwise along the pipeline,
+    and return generated alerts.
+    """
+    # Step 1: Fetch sensors from DB in pipeline order
+    sensors = db.query(Sensor).order_by(Sensor.sensor_id).all()
+    if not sensors:
+        raise HTTPException(status_code=404, detail="No sensors found in database")
+
+    # Step 2: Convert readings to dict {sensor_id: SensorData object}
+    sensor_data_dict: Dict[str, SensorData] = {}
+    for r in readings:
+        sensor_data_dict[r.sensor_id] = SensorData(
+            sensor_id=r.sensor_id,
+            flow_rate=r.flow_rate,
+            battery_level=r.battery_level,
+            timestamp=r.timestamp
+        )
+
+    # Step 3: Process data and generate alerts
+    alerts = process_sensor_data_pairwise(db, sensors, sensor_data_dict)
+
+    # Step 4: Format alerts to return JSON
+    response = []
+    for a in alerts:
+        response.append({
+            "alert_id": a.alert_id,
+            "sensor_from": a.sensor_from,
+            "sensor_to": a.sensor_to,
+            "alert_type": a.alert_type.value,
+            "severity": a.severity.value,
+            "probability": float(a.probability),
+            "timestamp": a.timestamp.isoformat(),
+            "status": a.status.value
+        })
+
+    return {"alerts_generated": response}
 
 # Fetch recent readings for a sensor
 @app.get("/sensors/{sensor_id}/data")
