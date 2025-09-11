@@ -44,8 +44,8 @@ def get_db():
 class SensorReading(BaseModel):
     sensor_id: str
     flow_rate: float
-    battery_level: int
-    timestamp: datetime
+    battery_level: int = None
+    timestamp: datetime = None
 
 
 @app.get("/")
@@ -174,15 +174,14 @@ def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get
     sensors = db.query(Sensor).all()
     if not sensors:
         raise HTTPException(status_code=404, detail="No sensors found in database")
-
+    time = datetime.utcnow()
     sensor_data_dict = {
         r.sensor_id: SensorData(
             sensor_id=r.sensor_id,
             flow_rate=r.flow_rate,
-            battery_level=r.battery_level,
-            timestamp=r.timestamp,
-        )
-        for r in readings
+            battery_level=r.battery_level if r.battery_level else 100,
+            timestamp=r.timestamp if r.timestamp else time,
+        ) for r in readings
     }
 
     alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, {})
