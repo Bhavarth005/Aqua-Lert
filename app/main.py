@@ -289,7 +289,7 @@ def get_weekly_usage(db: Session = Depends(get_db)):
         .limit(7)
         .all()
     )
-    return [{"day": str(r.day), "total_flow": float(r.total_flow)} for r in results]
+    return [{"day": r.day.strftime("%A"), "total_flow": float(r.total_flow)} for r in results]
 
 
 @app.get("/analytics/usage/today")
