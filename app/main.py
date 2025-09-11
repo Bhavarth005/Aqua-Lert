@@ -1,5 +1,6 @@
 from decimal import Decimal
 from fastapi import FastAPI, Depends, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.database import SessionLocal, engine
@@ -12,6 +13,7 @@ from app.utils import process_sensor_data_topology, build_topology
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="Smart Water Leakage API")
+app.add_middleware(CORSMiddleware, allow_origins="*", allow_credentials=True, allow_methods=["*"], allow_headers=["*"], )
 
 # ------------------- DB Session ------------------- #
 def get_db():
@@ -133,7 +135,7 @@ def add_sensor_data(sensor_id: str, flow_rate: float, battery_level: int, db: Se
     db.refresh(new_data)
 
     topology = build_topology(db)
-    sensors = db.query(Sensor).all()
+    sensors = [sensor]  # Only process the current sensor
     sensor_data_dict = {sensor_id: new_data}
 
     alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, topology)
