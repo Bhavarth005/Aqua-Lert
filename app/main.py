@@ -174,18 +174,22 @@ def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get
     sensors = db.query(Sensor).all()
     if not sensors:
         raise HTTPException(status_code=404, detail="No sensors found in database")
-    time = datetime.utcnow()
-    sensor_data_dict = {
-        r.sensor_id: SensorData(
+    time_now = datetime.utcnow()
+    sensor_data_dict = {}
+    for r in readings:
+        new_data = SensorData(
             sensor_id=r.sensor_id,
             flow_rate=r.flow_rate,
             battery_level=r.battery_level if r.battery_level else 100,
-            timestamp=r.timestamp if r.timestamp else time,
-        ) for r in readings
-    }
+            timestamp=r.timestamp if r.timestamp else time_now,
+        )
+        db.add(new_data)  
+        db.commit()
+        db.refresh(new_data)
+
+        sensor_data_dict[r.sensor_id] = new_data
 
     alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, {})
-
     return {
         "alerts_generated": [
             {
