@@ -8,8 +8,7 @@ from app.models import (
     Alert,
     AlertType,
     Severity,
-    AlertStatus,
-    PipelineTopology
+    AlertStatus
 )
 from sqlalchemy.orm import Session
 
@@ -189,8 +188,15 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 
 # ---------------- TOPOLOGY BUILDER ---------------- #
 def build_topology(db: Session):
+    """
+    Builds pipeline topology using parent_sensor_id column in Sensor table.
+    Returns dict {parent_sensor_id: [child_sensor_ids]}
+    """
+    from app.models import Sensor  # import here to avoid circular import
+
     topology = defaultdict(list)
-    mappings = db.query(PipelineTopology).all()
-    for m in mappings:
-        topology[m.parent_sensor_id].append(m.child_sensor_id)
+    sensors = db.query(Sensor).all()
+    for sensor in sensors:
+        if sensor.parent_sensor_id:  # only add if it has a parent
+            topology[sensor.parent_sensor_id].append(sensor.sensor_id)
     return topology

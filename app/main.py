@@ -48,6 +48,10 @@ class SensorReading(BaseModel):
     timestamp: datetime
 
 
+@app.get("/")
+def default():
+    return {"message": "Aqua-Lert Backend is up and running"}
+
 # ------------------- SENSOR ROUTES ------------------- #
 @app.post("/sensors")
 def create_sensor(
@@ -122,46 +126,47 @@ def delete_sensor(sensor_id: str, db: Session = Depends(get_db)):
 
 
 # ------------------- SENSOR DATA ROUTES ------------------- #
-@app.post("/sensors/{sensor_id}/data")
-def add_sensor_data(
-    sensor_id: str, flow_rate: float, battery_level: int, db: Session = Depends(get_db)
-):
-    sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
-    if not sensor:
-        raise HTTPException(status_code=404, detail="Sensor not found")
+@app.get("/sensors/{sensor_id}/data")
+def get_sensor_data(sensor_id: str, limit: int = 10, db: Session = Depends(get_db)):
+    if sensor_id == "all":
+        # Get latest records for all sensors, limited by 'limit' timestamps
+        readings = (
+            db.query(SensorData)
+            .order_by(SensorData.timestamp.desc())
+            .limit(limit * db.query(SensorData.sensor_id).distinct().count())
+            .all()
+        )
 
-    new_data = SensorData(
-        sensor_id=sensor_id,
-        flow_rate=flow_rate,
-        battery_level=battery_level,
-        timestamp=datetime.utcnow(),
-    )
-    db.add(new_data)
-    db.commit()
-    db.refresh(new_data)
+        # Group by timestamp
+        grouped = {}
+        for r in readings:
+            ts = r.timestamp.isoformat()
+            if ts not in grouped:
+                grouped[ts] = {"time": ts}
+            grouped[ts][r.sensor_id] = float(r.flow_rate)
 
-    sensors = [sensor]
-    sensor_data_dict = {sensor_id: new_data}
+        # Sort by timestamp desc and limit
+        return sorted(grouped.values(), key=lambda x: x["time"], reverse=True)[:limit]
 
-    alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, {})
+    else:
+        sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
+        if not sensor:
+            raise HTTPException(status_code=404, detail="Sensor not found")
 
-    return {
-        "message": "Data added successfully",
-        "data_id": new_data.id,
-        "alerts": [
-            {
-                "alert_id": a.alert_id,
-                "sensor_from": a.sensor_from,
-                "sensor_to": a.sensor_to,
-                "alert_type": a.alert_type.value,
-                "severity": a.severity.value,
-                "probability": float(a.probability),
-                "timestamp": a.timestamp.isoformat(),
-                "status": a.status.value,
-            }
-            for a in alerts
-        ],
-    }
+        readings = (
+            db.query(SensorData)
+            .filter(SensorData.sensor_id == sensor_id)
+            .order_by(SensorData.timestamp.desc())
+            .limit(limit)
+            .all()
+        )
+
+        # Convert to desired format
+        return [
+            {"time": r.timestamp.isoformat(), sensor_id: float(r.flow_rate)}
+            for r in readings
+        ]
+
 
 
 @app.post("/sensors/data")
