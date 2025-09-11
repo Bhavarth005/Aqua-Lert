@@ -9,7 +9,7 @@ from app.models import (
     AlertType,
     Severity,
     AlertStatus,
-    Sensor
+    PipelineTopology
 )
 from sqlalchemy.orm import Session
 
@@ -19,7 +19,7 @@ ANOMALY_FLOW_DROP = 0.5
 # ---------------- SIGMOID FUNCTION ---------------- #
 def sigmoid(x, x0=0, k=1):
     """Standard sigmoid: smooth mapping to 0-1"""
-    return 1 / (1 + exp(-k*(x - x0)))
+    return 1 / (1 + exp(-k * (x - x0)))
 
 
 def compute_leak_probability_sigmoid(flow1, flow2, battery1, battery2):
@@ -41,6 +41,22 @@ def compute_leak_probability_sigmoid(flow1, flow2, battery1, battery2):
     return leak_prob
 
 
+# ---------------- HELPER: GET LATEST SENSOR DATA ---------------- #
+def get_latest_data(sensor_id: str, new_readings: dict, db: Session):
+    """
+    Returns the latest SensorData for a given sensor_id.
+    Checks new_readings first, otherwise fetches from DB.
+    """
+    if sensor_id in new_readings:
+        return new_readings[sensor_id]
+    return (
+        db.query(SensorData)
+        .filter(SensorData.sensor_id == sensor_id)
+        .order_by(SensorData.timestamp.desc())
+        .first()
+    )
+
+
 # ---------------- PROCESS SENSOR DATA ---------------- #
 def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict, topology: dict):
     """
@@ -52,7 +68,9 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 
     # Compute processed data for each sensor individually
     for sensor in sensors:
-        sensor_data = new_readings[sensor.sensor_id]
+        sensor_data = get_latest_data(sensor.sensor_id, new_readings, db)
+        if not sensor_data:
+            continue
 
         # Smoothed flow: average of last 5 readings
         last_proc = (
@@ -82,13 +100,13 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 
     # ---------------- CHECK USING TOPOLOGY ---------------- #
     def traverse_and_check(parent_id):
-        parent_data = new_readings.get(parent_id)
+        parent_data = get_latest_data(parent_id, new_readings, db)
         if not parent_data:
             return
 
         children = topology.get(parent_id, [])
         for child_id in children:
-            child_data = new_readings.get(child_id)
+            child_data = get_latest_data(child_id, new_readings, db)
             if not child_data:
                 continue
 
@@ -172,9 +190,7 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 # ---------------- TOPOLOGY BUILDER ---------------- #
 def build_topology(db: Session):
     topology = defaultdict(list)
-    sensors = db.query(Sensor).all()
-    for s in sensors:
-        if s.parent_sensor_id:
-            topology[s.parent_sensor_id].append(s.sensor_id)
+    mappings = db.query(PipelineTopology).all()
+    for m in mappings:
+        topology[m.parent_sensor_id].append(m.child_sensor_id)
     return topology
-
