@@ -86,7 +86,7 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 
         flow_diff = 0
         if last_proc:
-            flow_diff = float(smoothed_flow - last_proc[0].smoothed_flow)
+            flow_diff = float(smoothed_flow - float(last_proc[0].smoothed_flow))
 
         processed = ProcessedData(
             sensor_id=sensor.sensor_id,
