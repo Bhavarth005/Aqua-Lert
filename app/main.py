@@ -16,6 +16,7 @@ from app.models import (
     AlertStatus,
 )
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from typing import List
 from app.utils import process_sensor_data_topology
 
@@ -174,7 +175,7 @@ def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get
     sensors = db.query(Sensor).all()
     if not sensors:
         raise HTTPException(status_code=404, detail="No sensors found in database")
-    time_now = datetime.utcnow()
+    time_now = datetime.now(ZoneInfo("Asia/Kolkata"))
     sensor_data_dict = {}
     for r in readings:
         new_data = SensorData(

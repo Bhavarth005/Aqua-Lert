@@ -2,6 +2,7 @@ from collections import defaultdict
 from decimal import Decimal
 from datetime import datetime
 from math import exp
+from zoneinfo import ZoneInfo
 from app.models import (
     SensorData,
     ProcessedData,
@@ -130,7 +131,7 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
                 alert = Alert(
                     sensor_from=parent_id,
                     sensor_to=child_id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(ZoneInfo("Asia/Kolkata")),
                     alert_type=AlertType.leak,
                     severity=severity,
                     probability=leak_prob,
@@ -144,7 +145,7 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
                 alert = Alert(
                     sensor_from=parent_id,
                     sensor_to=child_id,
-                    timestamp=datetime.utcnow(),
+                    timestamp=datetime.now(ZoneInfo("Asia/Kolkata")),
                     alert_type=AlertType.anomaly,
                     severity=Severity.medium,
                     probability=85.0,
@@ -159,7 +160,7 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
                     alert = Alert(
                         sensor_from=sid,
                         sensor_to=sid,
-                        timestamp=datetime.utcnow(),
+                        timestamp=datetime.now(ZoneInfo("Asia/Kolkata")),
                         alert_type=AlertType.low_battery,
                         severity=Severity.low,
                         probability=90.0,
