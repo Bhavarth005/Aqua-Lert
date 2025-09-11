@@ -32,6 +32,7 @@ class Sensor(Base):
     pipe_diameter_mm = Column(Integer)
     install_date = Column(Date)
     status = Column(Enum(SensorStatus), default=SensorStatus.active)
+    parent_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"), nullable=True)
 
 
 class SensorData(Base):
@@ -65,9 +66,3 @@ class Alert(Base):
     severity = Column(Enum(Severity))
     probability = Column(DECIMAL(5, 2))
     status = Column(Enum(AlertStatus), default=AlertStatus.active)
-
-class PipelineTopology(Base):
-    __tablename__ = "pipeline_topology"
-    id = Column(Integer, primary_key=True, index=True)
-    parent_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"))
-    child_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"))

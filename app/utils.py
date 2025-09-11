@@ -9,7 +9,7 @@ from app.models import (
     AlertType,
     Severity,
     AlertStatus,
-    PipelineTopology
+    Sensor
 )
 from sqlalchemy.orm import Session
 
@@ -172,7 +172,9 @@ def process_sensor_data_topology(db: Session, sensors: list, new_readings: dict,
 # ---------------- TOPOLOGY BUILDER ---------------- #
 def build_topology(db: Session):
     topology = defaultdict(list)
-    mappings = db.query(PipelineTopology).all()
-    for m in mappings:
-        topology[m.parent_sensor_id].append(m.child_sensor_id)
+    sensors = db.query(Sensor).all()
+    for s in sensors:
+        if s.parent_sensor_id:
+            topology[s.parent_sensor_id].append(s.sensor_id)
     return topology
+
