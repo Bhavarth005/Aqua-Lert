@@ -30,9 +30,7 @@ class Sensor(Base):
     sensor_id = Column(String(50), primary_key=True)
     location = Column(String(100))
     pipe_diameter_mm = Column(Integer)
-    install_date = Column(Date)
     status = Column(Enum(SensorStatus), default=SensorStatus.active)
-    parent_sensor_id = Column(String(50), ForeignKey("sensors.sensor_id"), nullable=True)
 
 
 class SensorData(Base):
@@ -42,27 +40,22 @@ class SensorData(Base):
     sensor_id = Column(String(50))
     timestamp = Column(DateTime)
     flow_rate = Column(DECIMAL(10, 3))
-    battery_level = Column(Integer)
 
 
-class ProcessedData(Base):
-    __tablename__ = "processed_data"
-
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
-    sensor_id = Column(String(50))
-    timestamp = Column(DateTime)
-    smoothed_flow = Column(DECIMAL(10, 3))
-    flow_diff = Column(DECIMAL(10, 3))
-
+from sqlalchemy import UniqueConstraint, Enum as SQLEnum
 
 class Alert(Base):
     __tablename__ = "alerts"
 
-    alert_id = Column(BigInteger, primary_key=True, autoincrement=True)
-    sensor_from = Column(String(50))  # new: start sensor
-    sensor_to = Column(String(50))    # new: end sensor
-    timestamp = Column(DateTime)
-    alert_type = Column(Enum(AlertType))
-    severity = Column(Enum(Severity))
+    alert_id = Column(Integer, primary_key=True, index=True)
+    sensor_from = Column(Integer, ForeignKey("sensors.sensor_id"))
+    sensor_to = Column(Integer, ForeignKey("sensors.sensor_id"))
+    alert_type = Column(SQLEnum(AlertType))
+    severity = Column(SQLEnum(Severity))
     probability = Column(DECIMAL(5, 2))
-    status = Column(Enum(AlertStatus), default=AlertStatus.active)
+    timestamp = Column(DateTime(timezone=True))
+    status = Column(SQLEnum(AlertStatus))
+
+    __table_args__ = (
+        UniqueConstraint("sensor_from", "sensor_to", "alert_type", "status", name="uq_active_alert"),
+    )

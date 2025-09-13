@@ -17,8 +17,8 @@ from app.models import (
 )
 from datetime import datetime, date
 from zoneinfo import ZoneInfo
-from typing import List
-from app.utils import process_sensor_data_topology
+import numpy as np
+from app.utils import analyze_sensors
 
 # Create tables
 Base.metadata.create_all(bind=engine)
@@ -42,11 +42,11 @@ def get_db():
 
 
 # ------------------- Pydantic Models ------------------- #
-class SensorReading(BaseModel):
-    sensor_id: str
-    flow_rate: float
-    battery_level: int = None
-    timestamp: datetime = None
+class SensorDataCreate(BaseModel):
+    sensor_1: float
+    sensor_2: float
+    sensor_3: float
+    sensor_4: float
 
 
 @app.get("/")
@@ -59,8 +59,7 @@ def create_sensor(
     sensor_id: str,
     location: str,
     pipe_diameter_mm: int,
-    parent_sensor_id: str = None,
-    db: Session = Depends(get_db),
+    db: Session = Depends(get_db)
 ):
     existing = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
     if existing:
@@ -69,8 +68,7 @@ def create_sensor(
     new_sensor = Sensor(
         sensor_id=sensor_id,
         location=location,
-        pipe_diameter_mm=pipe_diameter_mm,
-        parent_sensor_id=parent_sensor_id,
+        pipe_diameter_mm=pipe_diameter_mm
     )
     db.add(new_sensor)
     db.commit()
@@ -171,66 +169,67 @@ def get_sensor_data(sensor_id: str, limit: int = 10, db: Session = Depends(get_d
 
 
 @app.post("/sensors/data")
-def receive_sensor_data(readings: List[SensorReading], db: Session = Depends(get_db)):
-    sensors = db.query(Sensor).all()
-    if not sensors:
-        raise HTTPException(status_code=404, detail="No sensors found in database")
+def receive_sensor_data(data: SensorDataCreate, db: Session = Depends(get_db)):
     time_now = datetime.now(ZoneInfo("Asia/Kolkata"))
-    sensor_data_dict = {}
-    for r in readings:
-        new_data = SensorData(
-            sensor_id=r.sensor_id,
-            flow_rate=r.flow_rate,
-            battery_level=r.battery_level if r.battery_level else 100,
-            timestamp=r.timestamp if r.timestamp else time_now,
-        )
-        db.add(new_data)  
-        db.commit()
-        db.refresh(new_data)
 
-        sensor_data_dict[r.sensor_id] = new_data
-
-    alerts = process_sensor_data_topology(db, sensors, sensor_data_dict, {})
-    return {
-        "alerts_generated": [
-            {
-                "alert_id": a.alert_id,
-                "sensor_from": a.sensor_from,
-                "sensor_to": a.sensor_to,
-                "alert_type": a.alert_type.value,
-                "severity": a.severity.value,
-                "probability": float(a.probability),
-                "timestamp": a.timestamp.isoformat(),
-                "status": a.status.value,
-            }
-            for a in alerts
-        ]
+    # 1. Save raw sensor readings into SensorData table
+    readings = {
+        "sensor_1": data.sensor_1,
+        "sensor_2": data.sensor_2,
+        "sensor_3": data.sensor_3,
+        "sensor_4": data.sensor_4,
     }
 
-
-@app.get("/sensors/{sensor_id}/data")
-def get_sensor_data(sensor_id: str, limit: int = 10, db: Session = Depends(get_db)):
-    if sensor_id == "all":
-        readings = (
-            db.query(SensorData)
-            .order_by(SensorData.timestamp.desc())
-            .limit(limit)
-            .all()
+    for sid, val in readings.items():
+        entry = SensorData(
+            sensor_id=sid,
+            flow_rate=Decimal(str(val)),
+            timestamp=time_now,
         )
-        return readings
+        db.add(entry)
 
-    sensor = db.query(Sensor).filter(Sensor.sensor_id == sensor_id).first()
-    if not sensor:
-        raise HTTPException(status_code=404, detail="Sensor not found")
+    db.commit()
 
-    readings = (
-        db.query(SensorData)
-        .filter(SensorData.sensor_id == sensor_id)
-        .order_by(SensorData.timestamp.desc())
-        .limit(limit)
-        .all()
-    )
-    return readings
+    # 2. Run ML leak detection + localization
+
+    sensor_array = np.array([[data.sensor_1, data.sensor_2, data.sensor_3, data.sensor_4]])
+    result = analyze_sensors(sensor_array)
+
+    alerts_created = []
+
+    # 3. If leak detected, insert into Alert table
+    if result["leak_detected"]:
+        new_alert = Alert(
+            sensor_from=str(result["leak_from"]),
+            sensor_to=str(result["leak_to"]),
+            alert_type=AlertType.leak,
+            severity=Severity.high,  # You can adjust based on probability/flow diff
+            probability=Decimal("0.95"),  # placeholder, can be refined
+            timestamp=time_now,
+            status=AlertStatus.active,
+        )
+        db.add(new_alert)
+        db.commit()
+        db.refresh(new_alert)
+
+        alerts_created.append(
+            {
+                "alert_id": new_alert.alert_id,
+                "sensor_from": new_alert.sensor_from,
+                "sensor_to": new_alert.sensor_to,
+                "alert_type": new_alert.alert_type.value,
+                "severity": new_alert.severity.value,
+                "probability": float(new_alert.probability),
+                "timestamp": new_alert.timestamp.isoformat(),
+                "status": new_alert.status.value,
+            }
+        )
+
+    return {
+        "message": "Sensor data stored successfully",
+        "alerts_generated": alerts_created,
+        "ml_result": result,
+    }
 
 
 # ---------------- ALERT ROUTES ---------------- #
